@@ -30,6 +30,7 @@ def get_linkedin_profile_info(driver, profile_url):
         TR_email = "NoEmail"
         TR_company = "NoCompany"
         TR_position = "NoPosition"
+        TR_education = "NoEducation"
         TR_college = False
         TR_highschool = False
         TR_thai = False
@@ -166,6 +167,9 @@ def get_linkedin_profile_info(driver, profile_url):
                     school_name_element = element.find_element(By.XPATH, ".//span[not(contains(@class, 'visually-hidden'))]")
                     school_name = school_name_element.get_attribute('innerText').strip()
                     print(school_name)
+
+                    if TR_education == "NoEducation":
+                        TR_education = school_name
                     
                     # Check for specific matching schools
                     if "University of Illinois Urbana-Champaign" in school_name:
@@ -242,13 +246,13 @@ def get_linkedin_profile_info(driver, profile_url):
         print(f"An error occurred: {e}")
 
 
-    return TR_name, TR_company, TR_position, TR_email, TR_college, TR_highschool, TR_thai
+    return TR_name, TR_company, TR_position, TR_email, TR_education, TR_college, TR_highschool, TR_thai
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 
-def append_row_to_sheet(sheet_service, link, name, company, position, email, same_college, same_highschool, thai):
+def append_row_to_sheet(sheet_service, link, name, company, position, email, education, same_college, same_highschool, thai):
     # Get the current date in "dd/mm/yyyy" format
     current_date = datetime.datetime.now().strftime("%d/%m/%Y")
 
@@ -269,7 +273,7 @@ def append_row_to_sheet(sheet_service, link, name, company, position, email, sam
 
     # Prepare the values to be inserted
     values = [
-        ["N/A", "Not Yet", name, company, "", "", position, connection_value, email, link, "No", "No", "No", "No", "No", "", current_date]
+        ["N/A", "Not Yet", name, company, "", "", education, position, connection_value, email, link, "No", "No", "No", "No", "No", "", "Process", current_date]
     ]
 
     # Append the values to the sheet
@@ -281,22 +285,150 @@ def append_row_to_sheet(sheet_service, link, name, company, position, email, sam
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
-# def send_email(profile_info):
-#     # Set up email server and compose message
-#     server = smtplib.SMTP('smtp.example.com', 587)
-#     server.starttls()
-#     server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-    
-#     msg = MIMEMultipart()
-#     msg['From'] = EMAIL_ADDRESS
-#     msg['To'] = profile_info['email']
-#     msg['Subject'] = f"Coffee chat invitation from {profile_info['name']}"
 
-#     body = f"Hello {profile_info['name']},\n\nI came across your profile and I'm impressed by your work as a {profile_info['job_title']}. I would love to have a coffee chat with you to discuss potential collaboration opportunities. Please let me know if you would be interested.\n\nBest regards,\nYour Name"
-#     msg.attach(MIMEText(body, 'plain'))
-    
-#     server.send_message(msg)
-#     server.quit()
+def sortSheet(sheet_service, row, ascending):
+    # Fetch the sheet metadata to get the Sheet ID
+    sheet_metadata = sheet_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    sheets = sheet_metadata.get('sheets', '')
+    sheet_id = sheets[0].get("properties", {}).get("sheetId")
+
+    if (ascending) :
+        order = "ASCENDING"
+    else:
+        order = "DESCENDING"
+
+    # Prepare the request body for sorting
+    request_body = {
+        "requests": [
+            {
+                "sortRange": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1, # Skip first row which is headers
+                    },
+                    "sortSpecs": [
+                        {
+                            "dimensionIndex": row, # Zero-indexed row
+                            "sortOrder": order  # Ascending: A to Z, Descending: Z to A
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    # Send the batchUpdate request to sort the sheet
+    response = sheet_service.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body=request_body
+    ).execute()
+
+    print("Sheet sorted:", response)
+
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+def send_email(emailSendList, from_email, password):
+    # Set up email server and compose message
+    server = smtplib.SMTP(host='smtp.gmail.com', port=587)
+    server.starttls()
+    server.login(from_email, password)
+
+    # Create a message for each sent data
+    for item in emailSendList:
+        msg = MIMEMultipart()
+        msg['From'] = from_email
+        msg['To'] = item['Email']
+        msg['Subject'] = "UIUC student who would love to connect!"
+
+        # Variables/specifics for message content
+        lastName = ""
+        trimmedName = lastName.strip()
+        lastSpaceIdx = trimmedName.rfind(' ')
+        lastName = trimmedName[lastSpaceIdx + 1:] if lastSpaceIdx != -1 else trimmedName
+        
+        # NOTE: IF UNKNOWN PRONOUN CHECK, THEN SET LAST NAME TO FULL NAME
+
+        education = item['Education']
+        studentName = ""
+        if item['College'] == True:
+            education = "UIUC"
+            studentName = "Illini"
+        elif item['Highschool'] == True:
+            education = "ISB"
+            studentName = "ISB Panther"
+        
+        Thai = ""
+        if item['Thai'] == True:
+            Thai = "Thai "
+
+
+        message = ""
+
+        if (item['College'] == True or item['Education'] == True):
+            message = (f"Hi, (insert gender pronoun). {lastName}, \n\n"
+                    "I hope this email finds you well. My name is Nopparuj (Taz), and I'm a second year student at UIUC, majoring in computer science from Bangkok, Thailand. "
+                    f"I am reaching out because I am really interested in learning more about {item['Company']}. \n\n"
+
+                    f"I was particularly inspired to contact you upon learning that you completed your studies at {education}. "
+                    f"It's great to see a fellow {Thai}{studentName} in such an impactful and exciting company. "
+                    f"Your journey from {item['Education']} to working on impactful projects as a {item['Position']} at {item['Company']} is the path I aspire to follow. "
+                    "As a result, I would greatly appreciate the chance to chat with you about your professional experiences. \n\n"
+
+                    "I understand that you are very busy. If you have any availability in the coming weeks to join me on a brief call, I would love to set something up. "
+                    "Thank you so much for your time, and I look forward to hearing from you soon! \n\n"
+
+                    "Best regards, \n"
+                    "Taz")
+            
+        elif (item['Thai'] == True):
+            message = (f"Hi, (insert gender pronoun). {lastName}, \n\n"
+                    "I hope this email finds you well. My name is Nopparuj (Taz), and I'm a second year student at UIUC, majoring in computer science from Bangkok, Thailand. "
+                    f"I am reaching out because I am really interested in learning more about {item['Company']}. \n\n"
+
+                    "I was particularly inspired to contact you upon learning that you are from Thailand. "
+                    "It's great to see fellow Thai citizens making significant contributions within such a dynamic organization. "
+                    f"Your journey from {item['Education']} to working on impactful projects as a {item['Position']} at {item['Company']} is incredibly inspiring. "
+                    "As a result, I would greatly appreciate the chance to chat with you about your professional experiences. \n\n"
+
+                    "I understand that you are very busy. If you have any availability in the coming weeks to join me on a brief call, I would love to set something up. "
+                    "Thank you so much for your time, and I look forward to hearing from you soon! \n\n"
+
+                    "Best regards, \n"
+                    "Taz")
+            
+        else:
+            message = (f"Hi, (insert gender pronoun). {lastName}, \n\n"
+                    f"I hope this email finds you well. My name is Nopparuj (Taz), and I'm a second year student at UIUC, majoring in computer science from Bangkok, Thailand. "
+                    f"I am reaching out because I am really interested in learning more about {item['Company']}. \n\n"
+
+                    f"Your journey from {item['Education']} to working on impactful projects as a {item['Position']} at {item['Company']} is incredibly inspiring. "
+                    "As a result, I would greatly appreciate the chance to chat with you about your professional experiences. \n\n"
+
+                    "I understand that you are very busy. If you have any availability in the coming weeks to join me on a brief call, I would love to set something up. "
+                    "Thank you so much for your time, and I look forward to hearing from you soon! \n\n"
+
+                    "Best regards, \n"
+                    "Taz")
+        
+
+        msg.attach(MIMEText(message, 'plain'))
+
+        # Send the message
+        server.send_message(msg)
+
+    server.quit()
+
+    #CALL TO SET THIS ROW IN SHEETS TO SENT
+
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+# def extractEmail(first_name, last_name, company):
+#     # Set up email server and compose message
+
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 
 def main():
@@ -328,10 +460,9 @@ def main():
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
+    # UNCOMMENT THIS TO RUN
     # Initialize Chrome options and Driver
     chrome_options = Options()
-    # LeadLeaper Extension
-    # chrome_options.add_argument('--load-extension=/Users/tazvongpatarakul/Desktop/CodingStuff/LeadLeaper_Extension/7.1.20_0')
 
     # Initialize WebDriver
     service = Service(ChromeDriverManager().install())
@@ -347,53 +478,138 @@ def main():
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
-    # Navigate to the login page
-    login_url = 'https://www.linkedin.com/login'
-    driver.get(login_url)
+    # # Navigate to the login page
+    # login_url = 'https://www.linkedin.com/login'
+    # driver.get(login_url)
 
-    # Enter login credentials
-    # Use throwaway account while extracting info
-    time.sleep(2)
-    username = driver.find_element(By.ID, 'username')
-    username.send_keys('taz2547sub@gmail.com')
-    password = driver.find_element(By.ID, 'password')
-    password.send_keys('1234512345')
+    # # Enter login credentials
+    # # Use throwaway account while extracting info
+    # time.sleep(2)
+    # username = driver.find_element(By.ID, 'username')
+    # username.send_keys('taz2547sub@gmail.com')
+    # password = driver.find_element(By.ID, 'password')
+    # password.send_keys('1234512345')
 
-    # Submit the form
-    password.send_keys(Keys.RETURN)
+    # # Submit the form
+    # password.send_keys(Keys.RETURN)
 
-    # Can have time delay for human verification, until there is a better solution
-    time.sleep(60)
+    # # Can have time delay for human verification, until there is a better solution
+    # time.sleep(60)
 
-    # Wait for login to complete and navigate to the profile page
-    time.sleep(1)
-
-
-    #------------------------------------------------------------------------------------------------------------------------------------------------------#
-
-    names = []
-    companies = []
-    positions = []
-    emails = []
-    collegeBool = []
-    highschoolBool = []
-    thaiBool = []
-
-    for i in range(len(profile_urls)):
-        TR_name, TR_company, TR_position, TR_email, TR_college, TR_highschool, TR_thai = get_linkedin_profile_info(driver, profile_urls[i])
-        names.append(TR_name)
-        companies.append(TR_company)
-        positions.append(TR_position)
-        emails.append(TR_email)
-        collegeBool.append(TR_college)
-        highschoolBool.append(TR_highschool)
-        thaiBool.append(TR_thai)
+    # # Wait for login to complete and navigate to the profile page
+    # time.sleep(1)
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
-    for i in range(len(profile_urls)):
-        append_row_to_sheet(sheet_service, profile_urls[i], names[i], companies[i], positions[i], emails[i], collegeBool[i], highschoolBool[i], thaiBool[i])
+    # # Arrays to store information extracted from LinkedIn
+    # names = []
+    # companies = []
+    # positions = []
+    # emails = []
+    # education = []
+    # collegeBool = []
+    # highschoolBool = []
+    # thaiBool = []
+
+    # # Scrape info from linkedIn links (NEXT STEPS, IMPLEMENT SEARCH FUNCTIONALITY, CHECK WITH API IF IN LIST YET)
+    # for i in range(len(profile_urls)):
+    #     TR_name, TR_company, TR_position, TR_email, TR_education, TR_college, TR_highschool, TR_thai = get_linkedin_profile_info(driver, profile_urls[i])
+    #     names.append(TR_name)
+    #     companies.append(TR_company)
+    #     positions.append(TR_position)
+    #     emails.append(TR_email)
+    # if (TR_education == "University of Illinois Urbana-Champaign"):
+    #     education.append("UIUC")
+    # else:
+    #     education.append(TR_education)
+    #     collegeBool.append(TR_college)
+    #     highschoolBool.append(TR_highschool)
+    #     thaiBool.append(TR_thai)
+
+    # # Append extracted info into google sheets
+    # for i in range(len(profile_urls)):
+    #     append_row_to_sheet(sheet_service, profile_urls[i], names[i], companies[i], positions[i], emails[i], education[i], collegeBool[i], highschoolBool[i], thaiBool[i])
+
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------#
+        
+    # Extract info from sheets API
+
+    # Sorts column 10,(Column K: Coffee chat sent), so "no" entries are at the top
+    sortSheet(sheet_service, 10, True)
+
+    # Read data from the sheet
+    result = sheet_service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range='A2:L').execute()
+    rows = result.get('values', [])
+
+    # Filter rows where column L (index 11) is 'No' and extract specific columns
+    emailSendList = []
+    for row in rows:
+        if row[11] == 'No':
+            # Extract Name (C, index 2), Company (D, index 3), Education (G, index 6), Position (H, index 7), 
+            # College? (I, index 8), Highschool? (I, index 8), Thai? (I, index 8), and Gmail (J, index 9)
+
+            # Check if these characteristics exist in "Connection?" column
+            college = "Same College" in row[8]
+            highschool = "Same Highschool" in row[8]
+            thai = "Thai" in row[8]
+
+            filtered_row = {
+                'Name': row[2] if len(row) > 2 else '',
+                'Company': row[3] if len(row) > 3 else '',
+                'Education': row[6] if len(row) > 3 else '',
+                'Position': row[7] if len(row) > 6 else '',
+                'College': college,
+                'Highschool': highschool,
+                'Thai': thai,
+                'Email': row[9] if len(row) > 8 else ''
+            }
+            emailSendList.append(filtered_row)
+        else:
+            break
+
+    # Send out emails
+    send_email(listYay, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
+
+    
+    # TEST CODE: DELETE LATER    
+    listYay = []
+    filtered_row = {
+        'Name': "Taz",
+        'Company': "Company A",
+        'Education': "Education A",
+        'Position': "Position A",
+        'College': True,
+        'Highschool': True,
+        'Thai': True,
+        'Email': "taz2547@gmail.com"
+    }
+    listYay.append(filtered_row)
+    send_email(listYay, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
+        
+        #Change status to yes
+        
+
+
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------#
+        
+    # SEPARATE FUNCTIONALITY (STEP 2) (run at the end of the day)
+    # NOTE: Find some way to make it run autonomously?
+        #Extract email
+        #Check unread emails
+        #Find Specific Status (INCLUDE HERE)
+            #Some kind of separate check to find out if it is a request or appointment
+            #If request
+                #Call google calendar API
+                #Send ALL available times
+            #If appointment
+                #Check available times
+                #And/or select an available time
+                #Update google calendar api
+
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
