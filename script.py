@@ -571,25 +571,24 @@ def main():
             break
 
     # Send out emails
-    send_email(listYay, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
+    # send_email(emailSendList, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
 
     
     # TEST CODE: DELETE LATER    
-    listYay = []
-    filtered_row = {
-        'Name': "Taz",
-        'Company': "Company A",
-        'Education': "Education A",
-        'Position': "Position A",
-        'College': True,
-        'Highschool': True,
-        'Thai': True,
-        'Email': "taz2547@gmail.com"
-    }
-    listYay.append(filtered_row)
-    send_email(listYay, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
-        
-        #Change status to yes
+    # listYay = []
+    # filtered_row = {
+    #     'Name': "Taz",
+    #     'Company': "Company A",
+    #     'Education': "Education A",
+    #     'Position': "Position A",
+    #     'College': True,
+    #     'Highschool': True,
+    #     'Thai': True,
+    #     'Email': "taz2547@gmail.com"
+    # }
+    # listYay.append(filtered_row)
+    # send_email(listYay, "taz2547sub2@gmail.com", "enzq rtiu hgrq asox")
+
         
 
 
