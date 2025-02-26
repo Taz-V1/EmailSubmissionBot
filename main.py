@@ -1,6 +1,7 @@
 import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -14,7 +15,8 @@ from selenium.common.exceptions import NoSuchElementException
 
 from webdriver_manager.chrome import ChromeDriverManager
 
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 from googleapiclient.errors import HttpError
@@ -37,12 +39,20 @@ import subprocess
 import requests
 from requests.exceptions import RequestException
 
+from google.auth.transport.requests import Request
+# from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+
 SPREADSHEET_ID = '13AK7mmpuRHUc7yyP9l7VwEJKPLJ26MPja5o05Ib-J88'
 DOMAIN_SHEET_ID = '1DCUQw7c92AEKk0pURXegYp_Vy2TklDVijaoz0OMnTpw'
+INTERN_SHEET_ID = 'YOUR_INTERN_SHEET_ID'
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/gmail.send'
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/gmail.settings.basic'
 ]
 
 USER_AGENTS = [
@@ -149,16 +159,38 @@ class HunterIOAPI:
 class LinkedInApp:
     def __init__(self):
         self.root = tk.Tk()
+        self.root.geometry("1200x800")
         self.driver = None
         self._processing = False
         self.current_url_index = 0
         self.hunter_authenticated = False
+        self.extraction_window = None
         
-        # Initialize services
+        # Initialize services with separate credentials
         try:
-            creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-            self.sheet_service = build('sheets', 'v4', credentials=creds)
-            self.gmail_service = build('gmail', 'v1', credentials=creds)
+            # Sheets authentication using service account
+            sheets_creds = ServiceAccountCredentials.from_service_account_file(
+                'credentials.json', 
+                scopes=SCOPES
+            )
+            self.sheet_service = build('sheets', 'v4', credentials=sheets_creds)
+            
+            # Gmail authentication using OAuth token
+            gmail_creds = None
+            if os.path.exists('token.json'):
+                gmail_creds = UserCredentials.from_authorized_user_file('token.json', SCOPES)
+            
+            if not gmail_creds or not gmail_creds.valid:
+                if gmail_creds and gmail_creds.expired and gmail_creds.refresh_token:
+                    gmail_creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
+                    gmail_creds = flow.run_local_server(port=0)
+                with open('token.json', 'w') as token:
+                    token.write(gmail_creds.to_json())
+                    
+            self.gmail_service = build('gmail', 'v1', credentials=gmail_creds)
+            
         except Exception as e:
             messagebox.showerror("API Error", f"Failed to initialize services: {str(e)}")
             self.root.destroy()
@@ -167,14 +199,30 @@ class LinkedInApp:
         self.create_review_treeview()
 
     def on_close(self):
-        # Clean up resources when closing the app
+        """Ensure proper cleanup when closing"""
+        if self._processing:
+            if not messagebox.askyesno("Confirm Exit", 
+                "Processing is still running. Are you sure you want to exit?"):
+                return
+        
         if self.driver:
-            self.driver.quit()
+            try:
+                self.driver.quit()
+            except Exception as e:
+                print(f"Error closing driver: {e}")
+        
+        # Save any pending data
+        try:
+            self.save_to_sheets()
+        except Exception as e:
+            print(f"Error saving data: {e}")
+        
         self.root.destroy()
 
     def create_gui(self):
         # Main Window
         self.root.title("LinkedIn Manager")
+        # self.root.attributes('-topmost', True)
         
         # Input Frame
         self.input_frame = ttk.Frame(self.root, padding=20)
@@ -202,14 +250,16 @@ class LinkedInApp:
         self.review_frame.pack(fill='both', expand=True)
         
         # Treeview with Scrollbars - SPECIFY PARENT FRAME
-        self.tree = ttk.Treeview(self.review_frame, columns=(  # Add parent here
-            'Name', 'Email', 'Company', 'Position', 'Education',
-            'College', 'Highschool', 'Thai', 'URL'
-        ))
+        columns = ('Name', 'Email', 'Company', 'Position', 'Education', 'College', 'Highschool', 'Thai', 'URL', 'Intern')
+        self.tree = ttk.Treeview(self.review_frame, columns=columns, show="headings")
         
         # Configure columns first
-        for col in ['Position', 'Education', 'College', 'Highschool', 'Thai', 'URL']:
-            self.tree.column(col, width=0, stretch=tk.NO)
+        for col in columns:
+            self.tree.heading(col, text=col)
+            if col in ['Name', 'Email', 'Company', 'Thai', 'Intern']:
+                self.tree.column(col, width=120)
+            else:
+                self.tree.column(col, width=0, stretch=tk.NO)
 
         # Create scrollbars WITHIN THE REVIEW FRAME
         vsb = ttk.Scrollbar(self.review_frame, orient="vertical", command=self.tree.yview)
@@ -245,67 +295,26 @@ class LinkedInApp:
         # Cell editing implementation
         region = self.tree.identify("region", event.x, event.y)
         if region == "cell":
-            column = self.tree.identify_column(event.x)
+            col = self.tree.identify_column(event.x)
+            col_index = int(col[1:]) - 1
             item = self.tree.identify_row(event.y)
-            
-            # Get current value
-            col_index = int(column[1:])-1
-            current_value = self.tree.item(item, 'values')[col_index]
-            
-            # Create edit window
-            edit_win = tk.Toplevel()
-            edit_win.title("Edit Value")
-            
-            # Entry widget
-            entry = ttk.Entry(edit_win)
-            entry.insert(0, current_value)
-            entry.pack(padx=10, pady=10)
-            
-            # Save button
-            ttk.Button(edit_win, text="Save", 
-                     command=lambda: self.save_edited_value(item, col_index, entry.get(), edit_win)).pack()
-            
-    # def hunter_login(self):
-    #     """Log into Hunter.io service"""
-    #     print("Authenticating with Hunter.io...")
-    #     try:
-    #         with open("config.json") as f:
-    #             config = json.load(f)
-                
-    #         self.driver.get("https://hunter.io/users/sign_in")
-            
-    #         # Email field
-    #         email_field = WebDriverWait(self.driver, 25).until(
-    #             EC.presence_of_element_located((By.ID, "email-field"))
-    #         )
-    #         print("Entering email...")
-    #         human_type(email_field, config['hunter_email'])
-    #         time.sleep(random.uniform(0.5, 1.5))
-            
-    #         # Password field
-    #         password_field = self.driver.find_element(By.ID, "password-field")
-    #         print("Entering password...")
-    #         human_type(password_field, config['hunter_password'])
-    #         time.sleep(random.uniform(0.5, 1.5))
-            
-    #         # Click login
-    #         signin_button = WebDriverWait(self.driver, 10).until(
-    #             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Sign in')]"))
-    #         )
-    #         signin_button.click()
-            
-    #         time.sleep(1000)
-
-    #         # Verify login
-    #         WebDriverWait(self.driver, 30).until(
-    #             EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'/logout')]"))
-    #         )
-    #         print("Hunter.io login successful")
-    #         self.hunter_authenticated = True
-            
-    #     except Exception as e:
-    #         print(f"Hunter.io login failed: {str(e)}")
-    #         self.hunter_authenticated = False
+            values = list(self.tree.item(item, 'values'))
+            # If the "Thai" column (index 7) is clicked, toggle its value.
+            if col_index == 7:
+                new_value = not (values[7] in [True, 'True'])
+                values[7] = new_value
+                self.tree.item(item, values=values)
+            else:
+                # For other columns, allow normal editing.
+                current_value = values[col_index]
+                edit_win = tk.Toplevel()
+                edit_win.title("Edit Value")
+                entry = ttk.Entry(edit_win)
+                entry.insert(0, current_value)
+                entry.pack(padx=10, pady=10)
+                ttk.Button(edit_win, text="Save",
+                           command=lambda: self.save_edited_value(item, col_index, entry.get(), edit_win)
+                           ).pack()
             
     def handle_bot_detection(self):
         self.driver.save_screenshot('bot_detection.png')
@@ -340,12 +349,20 @@ class LinkedInApp:
             messagebox.showinfo("Already running", "Processing is already in progress")
             return
 
-        self.profile_urls = [url.strip() for url in self.url_text.get("1.0", tk.END).splitlines() 
-                            if url.startswith('https://www.linkedin.com/in/')]
+        existing_urls = {self.tree.item(item)['values'][8] for item in self.tree.get_children()}
+        raw_urls = [url.strip() for url in self.url_text.get("1.0", tk.END).splitlines() 
+                    if url.startswith('https://www.linkedin.com/in/')]
+        self.profile_urls = list(dict.fromkeys([u for u in raw_urls if u not in existing_urls]))
         
         if not self.profile_urls:
             messagebox.showwarning("No URLs", "No valid LinkedIn URLs found")
             return
+        
+        # Clear and disable URL input during extraction.
+        print("Beginning Extraction")
+        self.url_text.delete("1.0", tk.END)
+        self.url_text.config(state=tk.DISABLED)
+        # self.show_extraction_prompt()
 
         # Initialize driver if needed
         if not self.driver:
@@ -392,11 +409,16 @@ class LinkedInApp:
         self._processing = True
         self.process_next_profile()
 
+        # Clear the text area and re-enable input
+        self.url_text.config(state=tk.NORMAL)
+        print("Processing complete - ready for new URLs")
+
 
     def process_next_profile(self):
         if not self._processing or self.current_url_index >= len(self.profile_urls):
             self._processing = False
             self.update_ui_status("Processing complete")
+            # self.hide_extraction_prompt()
             return
 
         url = self.profile_urls[self.current_url_index]
@@ -462,7 +484,8 @@ class LinkedInApp:
             data['college'],
             data['highschool'],
             data['thai'],
-            url
+            url,
+            data['intern']
         ))
         # Immediately update the GUI
         self.root.update_idletasks()
@@ -526,63 +549,116 @@ class LinkedInApp:
         self.tree.item(item, values=values)
         window.destroy()
 
+    def get_links_from_sheet(sheet_service, spreadsheet_id, range):
+        try:
+            result = sheet_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=range
+            ).execute()
+            return [row[0] for row in result.get('values', []) if row]
+        except Exception as e:
+            print(f"Error fetching links: {str(e)}")
+            return []
+
     def save_to_sheets(self):
+        # Fetch existing links from both sheets
+        existing_main = self.get_links_from_sheet(self.sheet_service, SPREADSHEET_ID, 'Sheet1!K:K')
+        existing_intern = self.get_links_from_sheet(self.sheet_service, INTERN_SHEET_ID, 'Sheet1!K:K')
+        all_existing = set(existing_main + existing_intern)
+
         for item in self.tree.get_children():
             values = self.tree.item(item)['values']
-            try:
-                values = self.tree.item(item)['values']
-                append_row_to_sheet(
-                    self.sheet_service,
-                    link=values[8],  # URL remains at index 8 in treeview
-                    name=values[0],   # name
-                    company=values[2],# company
-                    position=values[3],# position
-                    email=values[1],  # email
-                    education=values[4],# education
-                    same_college=values[5],# college
-                    same_highschool=values[6],# highschool
-                    thai=values[7]    # thai
-                )
-            except Exception as e:
-                messagebox.showerror("Save Error", str(e))
+            link = values[8]
+            if link in all_existing:
+                continue
+
+            is_intern = values[9]
+            spreadsheet_id = INTERN_SHEET_ID if is_intern else SPREADSHEET_ID
+
+            # Append to the appropriate sheet
+            append_row_to_sheet(
+                self.sheet_service, spreadsheet_id,
+                link=link,
+                name=values[0],
+                company=values[2],
+                position=values[3],
+                email=values[1],
+                education=values[4],
+                same_college=values[5],
+                same_highschool=values[6],
+                thai=values[7]
+            )
 
     def prepare_emails(self):
-        try:
-            result = self.sheet_service.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID, 
-                range='Sheet1!A2:L'
-            ).execute()
-            rows = result.get('values', [])
+        # Get emails from treeview instead of sheets
+        emailSendList = []
+        
+        for item in self.tree.get_children():
+            values = self.tree.item(item)['values']
             
-            emailSendList = []
-            for row_idx, row in enumerate(rows):
-                if len(row) >= 12 and row[11] == 'No' and re.fullmatch(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b', row[9]):
-                    filtered_row = {
-                        'Name': row[2] if len(row) > 2 else '',
-                        'Company': row[3] if len(row) > 3 else '',
-                        'Position': row[7] if len(row) > 7 else '',
-                        'Email': row[9] if len(row) > 9 else '',
-                        'Education': row[6] if len(row) > 6 else '',
-                        'College': 'Same College' in row[8] if len(row) > 8 else False,
-                        'Highschool': 'Same Highschool' in row[8] if len(row) > 8 else False,
-                        'Thai': 'Thai' in row[8] if len(row) > 8 else False,
-                        'row_number': row_idx + 2  # +2 because sheet starts at row 2
+            # Create a new row in the sheet for tracking
+            try:
+                result = self.sheet_service.spreadsheets().values().append(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range='Sheet1!A:L',
+                    valueInputOption='USER_ENTERED',
+                    body={
+                        'values': [[
+                            values[0],  # Name
+                            values[2],  # Company
+                            values[3],  # Position
+                            values[1],  # Email
+                            values[4],  # Education
+                            values[5],  # College
+                            values[6],  # Highschool
+                            values[7],  # Thai
+                            datetime.datetime.now().strftime('%Y-%m-%d'),  # Date
+                            'No',  # Email sent status
+                            values[8],  # LinkedIn URL
+                            ''   # Future use
+                        ]]
                     }
-                    emailSendList.append(filtered_row)
-            
-            if emailSendList:
-                self.send_email(emailSendList)
-            else:
-                messagebox.showinfo("No Emails", "No pending emails to send")
+                ).execute()
                 
-        except Exception as e:
-            messagebox.showerror("Sheet Error", str(e))
+                # Get the row number of the newly inserted row
+                row_number = len(result.get('updates', {}).get('updatedRange', '').split('!')[1].split(':')[0])
+                
+                filtered_row = {
+                    'Name': values[0],
+                    'Company': values[2],
+                    'Position': values[3],
+                    'Email': values[1],
+                    'Education': values[4],
+                    'College': values[5],
+                    'Highschool': values[6],
+                    'Thai': values[7],
+                    'row_number': row_number
+                }
+                emailSendList.append(filtered_row)
+                
+            except Exception as e:
+                messagebox.showerror("Sheet Error", f"Failed to add record: {str(e)}")
+                return
+        
+        if emailSendList:
+            print("\n=== Sending Emails ===")
+            self.send_email(emailSendList)
+        else:
+            messagebox.showinfo("No Emails", "No new emails to send")
 
     def send_email(self, emailSendList):
         try:
             # Validate emails first
             invalid_emails = []
             valid_entries = []
+            
+            # Verify resume exists
+            resume_path = os.path.join('Resources', 'NopparujVongpatarakulResume.pdf')
+            if not os.path.exists(resume_path):
+                print(f"Resume not found at: {resume_path}")
+                resume_path = os.path.join('resources', 'NopparujVongpatarakulResume.pdf')  # Try lowercase folder
+                if not os.path.exists(resume_path):
+                    messagebox.showerror("Resume Error", "Resume not found in Resources or resources folder")
+                    return
             
             for item in emailSendList:
                 email = item.get('Email', '')
@@ -606,10 +682,11 @@ class LinkedInApp:
             # Process valid entries
             success_count = 0
             failed_emails = []
+            base_delay = 2  # Base delay between emails
             
             for idx, item in enumerate(valid_entries):
                 try:
-                    # Calculate send time with improved timezone handling
+                    # Calculate send time
                     now = datetime.datetime.now(datetime.timezone.utc).astimezone()
                     send_time = self.calculate_send_time(now)
 
@@ -623,32 +700,47 @@ class LinkedInApp:
                     message_content = self.generate_email_content(item, now)
                     msg.attach(MIMEText(message_content, 'plain'))
 
-                    # Create and send message
-                    raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
-                    body = {'raw': raw}
-                    
-                    if send_time > now:
-                        body['internalDate'] = str(int(send_time.timestamp() * 1000))
+                    # Attach resume
+                    print(f"Attaching resume from: {resume_path}")
+                    with open(resume_path, 'rb') as f:
+                        resume = MIMEApplication(f.read(), _subtype='pdf')
+                        resume.add_header('Content-Disposition', 'attachment', 
+                                        filename='Nopparuj_Dharmadamrong_Resume.pdf')
+                        msg.attach(resume)
 
-                    self.gmail_service.users().messages().send(
+                    # Create draft message
+                    raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+                    
+                    # Create draft with labels
+                    draft = self.gmail_service.users().drafts().create(
                         userId='me',
-                        body=body
+                        body={
+                            'message': {
+                                'raw': raw
+                            }
+                        }
                     ).execute()
 
-                    # Update sheet status
-                    self.update_sheet_status(item['row_number'])
+                    print(f"Created draft for {item['Email']} with ID: {draft['id']}")
+                    
                     success_count += 1
 
-                    # Rate limiting with random delay
-                    time.sleep(random.uniform(2, 5))  # More conservative delay
+                    # Adaptive delay with randomization
+                    delay = random.uniform(base_delay, base_delay * 2)
+                    if idx > 0 and idx % 5 == 0:
+                        delay += random.uniform(5, 10)  # Extra delay every 5 emails
+                    time.sleep(delay)
 
                 except Exception as e:
-                    failed_emails.append(f"{item['Email']} - {str(e)}")
-                    # Continue processing other emails even if one fails
+                    error_msg = f"{item['Email']} - {str(e)}"
+                    print(f"Error creating draft: {error_msg}")
+                    failed_emails.append(error_msg)
+                    time.sleep(random.uniform(10, 15))  # Longer delay after error
+                    continue
 
             # Show final results
             result_msg = [
-                f"Successfully scheduled: {success_count}/{len(valid_entries)}",
+                f"Successfully created drafts: {success_count}/{len(valid_entries)}",
                 f"Failed: {len(failed_emails)}"
             ]
             
@@ -656,7 +748,7 @@ class LinkedInApp:
                 result_msg.append("\nFailed emails:\n" + "\n".join(failed_emails))
                 
             messagebox.showinfo(
-                "Sending Complete",
+                "Draft Creation Complete",
                 "\n".join(result_msg)
             )
 
@@ -795,6 +887,8 @@ def get_linkedin_profile_info(self, driver, profile_url):
         TR_email = "No Email"
         TR_company = "No Company"
         TR_position = "No Position"
+        TR_intern = False
+        TR_education_list = []
         TR_education = "No Education Listed"
         TR_college = False
         TR_highschool = False
@@ -820,7 +914,6 @@ def get_linkedin_profile_info(self, driver, profile_url):
             experience_sections = driver.find_elements(By.XPATH, "//div[@data-view-name='profile-component-entity']")
             for section in experience_sections:
                 try:
-                    # Check for nested positions (multiple roles at same company)
                     roles = section.find_elements(By.XPATH, ".//div[@data-view-name='profile-component-entity']")
                     if roles:
                         company_element = section.find_element(By.XPATH, ".//span[not(contains(@class, 'visually-hidden'))][1]")
@@ -836,7 +929,6 @@ def get_linkedin_profile_info(self, driver, profile_url):
                         if not first_position:
                             break
                     else:
-                        # Handle single position entries
                         company_element = section.find_element(By.XPATH, ".//span[contains(@class, 't-14 t-normal')][1]")
                         company_full = company_element.text.strip().split('\n')[0]
                         company_name = company_full.split(' · ')[0]
@@ -853,6 +945,8 @@ def get_linkedin_profile_info(self, driver, profile_url):
         except Exception as e:
             print(f"Error locating experience sections: {str(e)}")
 
+        intern_keywords = {'apprentice', 'apprenticeship', 'intern', 'internship', 'trainee'}
+        TR_intern = any(keyword in TR_position.lower() for keyword in intern_keywords)
 
         # 3. Get Email from contact-info overlay
         email_found = False
@@ -891,7 +985,7 @@ def get_linkedin_profile_info(self, driver, profile_url):
                 company=TR_company
             )
             
-            if email_data and email_data['confidence'] is not None and email_data['confidence'] > 70:
+            if email_data and email_data['confidence'] is not None and email_data['confidence'] > 10:
                 TR_email = email_data['email']
                 print(f"Found email via API: {TR_email}")
                 email_found = True
@@ -936,7 +1030,6 @@ def get_linkedin_profile_info(self, driver, profile_url):
             print(f"\n⚠️ No email found for {name_display}")
             return None  # Signal to skip this entry
         
-        
         # 4. Get Education
         driver.get(profile_url + "details/education/")
         time.sleep(1)
@@ -946,6 +1039,7 @@ def get_linkedin_profile_info(self, driver, profile_url):
                 try:
                     school_element = edu.find_element(By.XPATH, ".//span[not(contains(@class, 'visually-hidden'))]")
                     school_name = school_element.text.strip()
+                    TR_education_list.append(school_name)  # Add to list
                     if TR_education == "No Education Listed":
                         TR_education = school_name
                     # Check for target schools
@@ -958,26 +1052,43 @@ def get_linkedin_profile_info(self, driver, profile_url):
         except Exception as e:
             print(f"Error locating education sections: {str(e)}")
         
-        # 5. Check Thai Language
+        # 5. Check Thai Language and Education
         driver.get(profile_url + "details/languages/")
         time.sleep(1)
         try:
             language_sections = driver.find_elements(By.XPATH, "//div[@data-view-name='profile-component-entity']")
             for lang in language_sections:
                 try:
-                    lang_element = lang.find_element(By.XPATH, ".//span[not(contains(@class, 'visually-hidden'))]")
-                    language = lang_element.text.strip()
-                    if "Thai" in language:
-                        # Check for native proficiency
-                        proficiency_element = lang.find_element(By.XPATH, ".//span[contains(@class, 'visually-hidden')]")
-                        proficiency = proficiency_element.get_attribute('innerText').strip()
-                        if "Native" in proficiency:
+                    # Get both the language name and proficiency level
+                    lang_text = lang.text.strip().split('\n')
+                    if len(lang_text) >= 2 and "Thai" in lang_text[0]:
+                        proficiency = lang_text[2].lower()
+                        print(f"Found Thai language with proficiency: {proficiency}")
+                        if "native" in proficiency or "bilingual" in proficiency:
                             TR_thai = True
                             break
                 except Exception as e:
                     print(f"Error processing language entry: {str(e)}")
         except Exception as e:
             print(f"Error locating language sections: {str(e)}")
+
+        # Check for Thai schools in education list
+        thai_schools = {
+            # Universities
+            'Chulalongkorn University', 'Mahidol University', 'Kasetsart University', 
+            'Thammasat University', 'King Mongkut', 'Assumption University',
+            'Bangkok University', 'Rangsit University', 'Silpakorn University',
+            'Srinakharinwirot University', 'ABAC', 'KMUTT', 'KMITL',
+            # International Schools
+            'International School Bangkok', 'Bangkok Patana', 'NIST International School',
+            'Ruamrudee International School', 'Shrewsbury International School',
+            'Harrow International School', 'Bangkok Prep', 'KIS International School',
+            'SISB', 'Wells International School'
+        }
+        
+        TR_thai_education = any(any(school.lower() in edu.lower() for school in thai_schools) 
+                              for edu in TR_education_list)
+        TR_thai = TR_thai or TR_thai_education
         
     except Exception as e:
         print(f"Critical error during scraping: {str(e)}")
@@ -991,14 +1102,15 @@ def get_linkedin_profile_info(self, driver, profile_url):
         'education': TR_education or "N/A",
         'college': TR_college,
         'highschool': TR_highschool,
-        'thai': TR_thai
+        'thai': TR_thai,
+        'intern': TR_intern
     }
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 
-def append_row_to_sheet(sheet_service, link, name, company, position, email, education, same_college, same_highschool, thai, force=False):
+def append_row_to_sheet(sheet_service, spreadsheet_id, link, name, company, position, email, education, same_college, same_highschool, thai, force=False):
     #💬 DUPLICATE CHECK: Verify link doesn't exist in column K unless forcing
     if email in ["No Email", "N/A"]:
         print("Skipping sheet entry - no valid email")
@@ -1016,32 +1128,25 @@ def append_row_to_sheet(sheet_service, link, name, company, position, email, edu
         
     # Get the current date in "dd/mm/yyyy" format
     current_date = datetime.datetime.now().strftime("%d/%m/%Y")
-
-    # Find the next empty row in the sheet
-    result = sheet_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range="Sheet1").execute()
-    rows = result.get('values', [])
-    next_empty_row = len(rows) + 1
-
-    # Format the "Connection?" column based on boolean arguments
     connections = []
-    if same_college:
-        connections.append("Same College")
-    if same_highschool:
-        connections.append("Same Highschool")
-    if thai:
-        connections.append("Thai")
-    connection_value = ", ".join(connections) if connections else "N/A"
-
-    # Prepare the values to be inserted
+    if same_college: connections.append("Same College")
+    if same_highschool: connections.append("Same Highschool")
+    if thai: connections.append("Thai")
+    
     values = [
-        ["N/A", "Not Yet", name, company, "", "", education, position, connection_value, email, link, "No", "No", "No", "No", "No", "", "Process", current_date]
+        ["N/A", "Not Yet", name, company, "", "", education, position, 
+         ", ".join(connections) if connections else "N/A", email, link,
+         "No", "No", "No", "No", "No", "", "Process", current_date]
     ]
 
-    # Append the values to the sheet
+    # Append to sheet
     body = {'values': values}
     sheet_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID, range="Sheet1!A" + str(next_empty_row),
-        valueInputOption="USER_ENTERED", body=body).execute()
+        spreadsheetId=spreadsheet_id,
+        range="Sheet1!A:A",
+        valueInputOption="USER_ENTERED",
+        body=body
+    ).execute()
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
@@ -1108,3 +1213,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
