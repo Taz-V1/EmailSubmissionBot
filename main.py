@@ -40,12 +40,11 @@ import requests
 from requests.exceptions import RequestException
 
 from google.auth.transport.requests import Request
-# from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SPREADSHEET_ID = '13AK7mmpuRHUc7yyP9l7VwEJKPLJ26MPja5o05Ib-J88'
 DOMAIN_SHEET_ID = '1DCUQw7c92AEKk0pURXegYp_Vy2TklDVijaoz0OMnTpw'
-INTERN_SHEET_ID = 'YOUR_INTERN_SHEET_ID'
+INTERN_SHEET_ID = 'spreadsheets/d/1e51xKqxg55XcFCC0w9ySKTU4QvNZXTT6-OpxWV_HX6U'
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -362,7 +361,6 @@ class LinkedInApp:
         print("Beginning Extraction")
         self.url_text.delete("1.0", tk.END)
         self.url_text.config(state=tk.DISABLED)
-        # self.show_extraction_prompt()
 
         # Initialize driver if needed
         if not self.driver:
@@ -418,7 +416,8 @@ class LinkedInApp:
         if not self._processing or self.current_url_index >= len(self.profile_urls):
             self._processing = False
             self.update_ui_status("Processing complete")
-            # self.hide_extraction_prompt()
+            self.bring_to_front()
+            print("Processing complete - ready for new URLs")
             return
 
         url = self.profile_urls[self.current_url_index]
@@ -462,6 +461,13 @@ class LinkedInApp:
             
             if "404" in str(e):
                 self.current_url_index += 1
+                
+            if self.current_url_index >= len(self.profile_urls):
+                self._processing = False
+                self.update_ui_status("Processing complete")
+                self.bring_to_front()
+                print("Processing complete - ready for new URLs")
+                return
 
             self.handle_scrape_error(url, str(e))
             self.root.after(45000, self.process_next_profile)
@@ -561,6 +567,7 @@ class LinkedInApp:
 
     def save_to_sheets(self):
         # Fetch existing links from both sheets
+        print("Saving to sheets...")
         existing_main = self.get_links_from_sheet(self.sheet_service, SPREADSHEET_ID, 'Sheet1!K:K')
         existing_intern = self.get_links_from_sheet(self.sheet_service, INTERN_SHEET_ID, 'Sheet1!K:K')
         all_existing = set(existing_main + existing_intern)
@@ -589,34 +596,67 @@ class LinkedInApp:
             )
 
     def prepare_emails(self):
+        # Disable GUI elements during email processing
+        self.url_text.config(state=tk.DISABLED)
+        
         # Get emails from treeview instead of sheets
         emailSendList = []
         
+        # First, get all existing LinkedIn URLs from the sheet
+        try:
+            result = self.sheet_service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range='Sheet1!M:M'  # LinkedIn URLs column
+            ).execute()
+            existing_urls = set(row[0] for row in result.get('values', [])[1:] if row)  # Skip header
+        except Exception as e:
+            messagebox.showerror("Sheet Error", f"Failed to check existing records: {str(e)}")
+            self.url_text.config(state=tk.NORMAL)
+            return
+        
         for item in self.tree.get_children():
             values = self.tree.item(item)['values']
+            linkedin_url = values[8]  # URL from treeview
+            
+            # Skip if URL already exists in sheet
+            if linkedin_url in existing_urls:
+                print(f"Skipping duplicate LinkedIn profile: {linkedin_url}")
+                continue
             
             # Create a new row in the sheet for tracking
             try:
+                current_date = datetime.datetime.now().strftime('%Y-%m-%d')
+                
+                # Prepare row values according to specified columns
+                row_values = [
+                    'N/A',                  # A: Offered help on
+                    'Not Yet',              # B: Status
+                    values[0],              # C: Name
+                    values[2],              # D: Company
+                    '',                     # E: Location (empty)
+                    '',                     # F: Industry (empty)
+                    values[4],              # G: Education
+                    values[3],              # H: Position
+                    'Yes' if values[7] else 'No',  # I: Connection (Thai)
+                    'Yes' if values[5] else 'No',  # J: Connection (College)
+                    'Yes' if values[6] else 'No',  # K: Connection (Highschool)
+                    values[1],              # L: Gmail
+                    linkedin_url,           # M: LinkedIn URL
+                    'Yes',                  # N: Coffee Chat Invite Sent?
+                    'No',                   # O: Coffee Chat Yet?
+                    'No',                   # P: Thank You Message Sent?
+                    'No',                   # Q: Connect on LinkedIn?
+                    'No',                   # R: Follow Up 1
+                    '',                     # S: Coffee Chat Notes
+                    'Process',              # T: Process with Bot?
+                    current_date            # U: Last Updated Date
+                ]
+                
                 result = self.sheet_service.spreadsheets().values().append(
                     spreadsheetId=SPREADSHEET_ID,
-                    range='Sheet1!A:L',
+                    range='Sheet1!A2',
                     valueInputOption='USER_ENTERED',
-                    body={
-                        'values': [[
-                            values[0],  # Name
-                            values[2],  # Company
-                            values[3],  # Position
-                            values[1],  # Email
-                            values[4],  # Education
-                            values[5],  # College
-                            values[6],  # Highschool
-                            values[7],  # Thai
-                            datetime.datetime.now().strftime('%Y-%m-%d'),  # Date
-                            'No',  # Email sent status
-                            values[8],  # LinkedIn URL
-                            ''   # Future use
-                        ]]
-                    }
+                    body={'values': [row_values]}
                 ).execute()
                 
                 # Get the row number of the newly inserted row
@@ -637,6 +677,7 @@ class LinkedInApp:
                 
             except Exception as e:
                 messagebox.showerror("Sheet Error", f"Failed to add record: {str(e)}")
+                self.url_text.config(state=tk.NORMAL)
                 return
         
         if emailSendList:
@@ -644,6 +685,7 @@ class LinkedInApp:
             self.send_email(emailSendList)
         else:
             messagebox.showinfo("No Emails", "No new emails to send")
+            self.url_text.config(state=tk.NORMAL)
 
     def send_email(self, emailSendList):
         try:
@@ -705,7 +747,7 @@ class LinkedInApp:
                     with open(resume_path, 'rb') as f:
                         resume = MIMEApplication(f.read(), _subtype='pdf')
                         resume.add_header('Content-Disposition', 'attachment', 
-                                        filename='Nopparuj_Dharmadamrong_Resume.pdf')
+                                        filename='Nopparuj_Vongpatarakul_Resume.pdf')
                         msg.attach(resume)
 
                     # Create draft message
@@ -797,14 +839,11 @@ class LinkedInApp:
         # Build message template
         templates = {
             'alumni': f"""Hi {last_name},
-    I hope this message finds you well. My name is Nopparuj (Taz), a second year Computer Science student at UIUC from Bangkok, Thailand.
-    I'm reaching out because I'm particularly interested in {item['Company']}'s work in your field as a {item['Position']}.
+    I hope this message finds you well. My name is Nopparuj (Taz), a third year Computer Science student at UIUC from Bangkok, Thailand. I'm reaching out because I'm particularly interested in {item['Company']}'s work in your field as a {item['Position']}.
 
-    Having noticed your background at {education}, I'm inspired by your career path from {education} to {item['Company']}. 
-    As a fellow {student_name}, I'd greatly appreciate any insights you might share about breaking into this field.
+    Having noticed your background at {education}, I'm inspired by your career path from {education} to {item['Company']}. As a fellow {student_name}, I'd greatly appreciate any insights you might share about breaking into this field.
 
-    Would you have {time_reference} for a brief 15-minute chat about your professional experiences? I completely understand if you're busy - 
-    even a quick email response would be incredibly helpful.
+    Would you have {time_reference} for a brief 15-minute chat about your professional experiences? I completely understand if you're busy - even a quick email response would be incredibly helpful.
 
     Thank you for considering my request, and I hope to connect soon!
 
@@ -812,11 +851,9 @@ class LinkedInApp:
     Taz""",
 
             'thai': f"""Hi {last_name},
-    I hope this email finds you well. My name is Nopparuj (Taz), a second year Computer Science student at UIUC from Bangkok.
-    I'm reaching out because I'm impressed by {item['Company']}'s innovations in your field as a {item['Position']}.
+    I hope this email finds you well. My name is Nopparuj (Taz), a third year Computer Science student at UIUC from Bangkok. I'm reaching out because I'm impressed by {item['Company']}'s innovations in your field as a {item['Position']}.
 
-    As a Thai professional working abroad, your experience is particularly inspiring to me. 
-    I'd be grateful for any advice you might have about navigating international tech careers.
+    As a Thai professional working abroad, your experience is particularly inspiring to me. I'd be grateful for any advice you might have about navigating international tech careers.
 
     Might you have {time_reference} for a short conversation? I'd be happy to adjust to your schedule.
 
@@ -826,11 +863,9 @@ class LinkedInApp:
     Taz""",
 
             'general': f"""Hi {last_name},
-    I hope you're doing well! I'm Nopparuj (Taz), a second year CS student at UIUC from Bangkok.
-    I'm reaching out because I'm keenly interested in {item['Company']}'s work in your role as a {item['Position']}.
+    I hope you're doing well! I'm Nopparuj (Taz), a third year CS student at UIUC from Bangkok. I'm reaching out because I'm keenly interested in {item['Company']}'s work in your role as a {item['Position']}.
 
-    Your career journey from {education} to {item['Company']} is exactly the kind of path I aspire to follow. 
-    Could I possibly ask for {time_reference} for a brief chat about your experiences?
+    Your career journey from {education} to {item['Company']} is exactly the kind of path I aspire to follow. Could I possibly ask for {time_reference} for a brief chat about your experiences?
 
     I completely understand if you're too busy - any insights you could share via email would also be greatly appreciated.
 
@@ -860,6 +895,11 @@ class LinkedInApp:
             ).execute()
         except Exception as e:
             messagebox.showerror("Update Error", str(e))
+
+    def bring_to_front(self):
+        """Bring window to front and maintain focus"""
+        self.root.lift()  # Lift the window
+        self.root.focus_force()  # Force focus on the window
 
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------#
@@ -1193,13 +1233,6 @@ def sortSheet(sheet_service, row, ascending):
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
-
-# def extractEmail(first_name, last_name, company):
-#     # Set up email server and compose message
-
-
-    #------------------------------------------------------------------------------------------------------------------------------------------------------#
-
 
 def main():
     try:
