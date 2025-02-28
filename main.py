@@ -210,12 +210,6 @@ class LinkedInApp:
             except Exception as e:
                 print(f"Error closing driver: {e}")
         
-        # Save any pending data
-        try:
-            self.save_to_sheets()
-        except Exception as e:
-            print(f"Error saving data: {e}")
-        
         self.root.destroy()
 
     def create_gui(self):
@@ -445,6 +439,13 @@ class LinkedInApp:
                 raise
 
             self.current_url_index += 1
+            if self.current_url_index >= len(self.profile_urls):
+                self._processing = False
+                self.update_ui_status("Processing complete")
+                self.bring_to_front()
+                print("Processing complete - ready for new URLs")
+                return
+
             self.root.after(int(random.uniform(15000, 30000)), self.process_next_profile)
 
         except Exception as e:
@@ -555,46 +556,6 @@ class LinkedInApp:
         self.tree.item(item, values=values)
         window.destroy()
 
-    def get_links_from_sheet(sheet_service, spreadsheet_id, range):
-        try:
-            result = sheet_service.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id, range=range
-            ).execute()
-            return [row[0] for row in result.get('values', []) if row]
-        except Exception as e:
-            print(f"Error fetching links: {str(e)}")
-            return []
-
-    def save_to_sheets(self):
-        # Fetch existing links from both sheets
-        print("Saving to sheets...")
-        existing_main = self.get_links_from_sheet(self.sheet_service, SPREADSHEET_ID, 'Sheet1!K:K')
-        existing_intern = self.get_links_from_sheet(self.sheet_service, INTERN_SHEET_ID, 'Sheet1!K:K')
-        all_existing = set(existing_main + existing_intern)
-
-        for item in self.tree.get_children():
-            values = self.tree.item(item)['values']
-            link = values[8]
-            if link in all_existing:
-                continue
-
-            is_intern = values[9]
-            spreadsheet_id = INTERN_SHEET_ID if is_intern else SPREADSHEET_ID
-
-            # Append to the appropriate sheet
-            append_row_to_sheet(
-                self.sheet_service, spreadsheet_id,
-                link=link,
-                name=values[0],
-                company=values[2],
-                position=values[3],
-                email=values[1],
-                education=values[4],
-                same_college=values[5],
-                same_highschool=values[6],
-                thai=values[7]
-            )
-
     def prepare_emails(self):
         # Disable GUI elements during email processing
         self.url_text.config(state=tk.DISABLED)
@@ -629,27 +590,27 @@ class LinkedInApp:
                 
                 # Prepare row values according to specified columns
                 row_values = [
-                    'N/A',                  # A: Offered help on
-                    'Not Yet',              # B: Status
-                    values[0],              # C: Name
-                    values[2],              # D: Company
-                    '',                     # E: Location (empty)
-                    '',                     # F: Industry (empty)
-                    values[4],              # G: Education
-                    values[3],              # H: Position
-                    'Yes' if values[7] else 'No',  # I: Connection (Thai)
-                    'Yes' if values[5] else 'No',  # J: Connection (College)
-                    'Yes' if values[6] else 'No',  # K: Connection (Highschool)
-                    values[1],              # L: Gmail
-                    linkedin_url,           # M: LinkedIn URL
-                    'Yes',                  # N: Coffee Chat Invite Sent?
-                    'No',                   # O: Coffee Chat Yet?
-                    'No',                   # P: Thank You Message Sent?
-                    'No',                   # Q: Connect on LinkedIn?
-                    'No',                   # R: Follow Up 1
-                    '',                     # S: Coffee Chat Notes
-                    'Process',              # T: Process with Bot?
-                    current_date            # U: Last Updated Date
+                    'N/A',                                                              # A: Offered help on
+                    'Reached out',                                                      # B: Status
+                    values[0],                                                          # C: Name
+                    values[2],                                                          # D: Company
+                    '',                                                                 # E: Location (empty)
+                    '',                                                                 # F: Industry (empty)
+                    values[4],                                                          # G: Education
+                    values[3],                                                          # H: Position
+                    'Yes' if str(values[7]).lower() in ['true', '1', 'yes'] else 'No',  # I: Connection (Thai)
+                    'Yes' if str(values[5]).lower() in ['true', '1', 'yes'] else 'No',  # J: Connection (College)
+                    'Yes' if str(values[6]).lower() in ['true', '1', 'yes'] else 'No',  # K: Connection (Highschool)
+                    values[1],                                                          # L: Gmail
+                    linkedin_url,                                                       # M: LinkedIn URL
+                    'Yes',                                                              # N: Coffee Chat Invite Sent?
+                    'No',                                                               # O: Coffee Chat Yet?
+                    'No',                                                               # P: Thank You Message Sent?
+                    'No',                                                               # Q: Connect on LinkedIn?
+                    'No',                                                               # R: Follow Up 1
+                    '',                                                                 # S: Coffee Chat Notes
+                    'Process',                                                          # T: Process with Bot?
+                    current_date                                                        # U: Last Updated Date
                 ]
                 
                 result = self.sheet_service.spreadsheets().values().append(
@@ -882,19 +843,6 @@ class LinkedInApp:
             return templates['alumni']
         else:
             return templates['general']
-
-    def update_sheet_status(self, row_number):
-        try:
-            range_name = f'Sheet1!L{row_number}'
-            body = {'values': [['Yes']]}
-            self.sheet_service.spreadsheets().values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=range_name,
-                valueInputOption='USER_ENTERED',
-                body=body
-            ).execute()
-        except Exception as e:
-            messagebox.showerror("Update Error", str(e))
 
     def bring_to_front(self):
         """Bring window to front and maintain focus"""
@@ -1140,96 +1088,11 @@ def get_linkedin_profile_info(self, driver, profile_url):
         'position': TR_position or "N/A",
         'email': TR_email or "N/A",
         'education': TR_education or "N/A",
-        'college': TR_college,
-        'highschool': TR_highschool,
-        'thai': TR_thai,
-        'intern': TR_intern
+        'college': bool(TR_college),      
+        'highschool': bool(TR_highschool),
+        'thai': bool(TR_thai),            
+        'intern': bool(TR_intern)         
     }
-
-
-    #------------------------------------------------------------------------------------------------------------------------------------------------------#
-
-
-def append_row_to_sheet(sheet_service, spreadsheet_id, link, name, company, position, email, education, same_college, same_highschool, thai, force=False):
-    #💬 DUPLICATE CHECK: Verify link doesn't exist in column K unless forcing
-    if email in ["No Email", "N/A"]:
-        print("Skipping sheet entry - no valid email")
-        return
-
-    if not force:
-        existing = sheet_service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!K:K"  #💬 Column K contains profile links
-        ).execute().get('values', [])
-        
-        existing_links = [item[0] for item in existing if item]
-        if link in existing_links:
-            raise ValueError(f"Duplicate link: {link}")
-        
-    # Get the current date in "dd/mm/yyyy" format
-    current_date = datetime.datetime.now().strftime("%d/%m/%Y")
-    connections = []
-    if same_college: connections.append("Same College")
-    if same_highschool: connections.append("Same Highschool")
-    if thai: connections.append("Thai")
-    
-    values = [
-        ["N/A", "Not Yet", name, company, "", "", education, position, 
-         ", ".join(connections) if connections else "N/A", email, link,
-         "No", "No", "No", "No", "No", "", "Process", current_date]
-    ]
-
-    # Append to sheet
-    body = {'values': values}
-    sheet_service.spreadsheets().values().append(
-        spreadsheetId=spreadsheet_id,
-        range="Sheet1!A:A",
-        valueInputOption="USER_ENTERED",
-        body=body
-    ).execute()
-
-
-    #------------------------------------------------------------------------------------------------------------------------------------------------------#
-
-
-def sortSheet(sheet_service, row, ascending):
-    # Fetch the sheet metadata to get the Sheet ID
-    sheet_metadata = sheet_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-    sheets = sheet_metadata.get('sheets', '')
-    sheet_id = sheets[0].get("properties", {}).get("sheetId")
-
-    if (ascending) :
-        order = "ASCENDING"
-    else:
-        order = "DESCENDING"
-
-    # Prepare the request body for sorting
-    request_body = {
-        "requests": [
-            {
-                "sortRange": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": 1, # Skip first row which is headers
-                    },
-                    "sortSpecs": [
-                        {
-                            "dimensionIndex": row, # Zero-indexed row
-                            "sortOrder": order  # Ascending: A to Z, Descending: Z to A
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-
-    # Send the batchUpdate request to sort the sheet
-    response = sheet_service.spreadsheets().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body=request_body
-    ).execute()
-
-    print("Sheet sorted:", response)
 
 
     #------------------------------------------------------------------------------------------------------------------------------------------------------#
