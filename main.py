@@ -104,9 +104,8 @@ class HunterIOAPI:
             print(f"Hunter API Error: {str(e)}")
             # Use e.response to check the status code, if available
             if e.response is not None and e.response.status_code == 429:
-                print("Rate limit exceeded. Waiting 60 seconds...")
-                time.sleep(60)
-                return self._make_request(endpoint, params)
+                print("Rate limit exceeded, skipping this profile...")
+                return None  # Return None instead of retrying
             return None
 
     def find_email(self, first_name, last_name, company=None, domain=None, full_name=None, max_duration=10):
@@ -169,23 +168,23 @@ class LinkedInApp:
         try:
             # Sheets authentication using service account
             sheets_creds = ServiceAccountCredentials.from_service_account_file(
-                'credentials.json', 
+                'resources/credentials.json',  # Updated path
                 scopes=SCOPES
             )
             self.sheet_service = build('sheets', 'v4', credentials=sheets_creds)
             
             # Gmail authentication using OAuth token
             gmail_creds = None
-            if os.path.exists('token.json'):
-                gmail_creds = UserCredentials.from_authorized_user_file('token.json', SCOPES)
+            if os.path.exists('resources/token.json'):  # Updated path
+                gmail_creds = UserCredentials.from_authorized_user_file('resources/token.json', SCOPES)
             
             if not gmail_creds or not gmail_creds.valid:
                 if gmail_creds and gmail_creds.expired and gmail_creds.refresh_token:
                     gmail_creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
+                    flow = InstalledAppFlow.from_client_secrets_file('resources/client_secret.json', SCOPES)  # Updated path
                     gmail_creds = flow.run_local_server(port=0)
-                with open('token.json', 'w') as token:
+                with open('resources/token.json', 'w') as token:  # Updated path
                     token.write(gmail_creds.to_json())
                     
             self.gmail_service = build('gmail', 'v1', credentials=gmail_creds)
@@ -243,13 +242,13 @@ class LinkedInApp:
         self.review_frame.pack(fill='both', expand=True)
         
         # Treeview with Scrollbars - SPECIFY PARENT FRAME
-        columns = ('Name', 'Email', 'Company', 'Position', 'Education', 'College', 'Highschool', 'Thai', 'URL', 'Intern')
+        columns = ('Name', 'Email', 'Company', 'Position', 'Education', 'College', 'Highschool', 'Thai', 'URL', 'Intern', 'Honorific')
         self.tree = ttk.Treeview(self.review_frame, columns=columns, show="headings")
         
         # Configure columns first
         for col in columns:
             self.tree.heading(col, text=col)
-            if col in ['Name', 'Email', 'Company', 'Thai', 'Intern']:
+            if col in ['Name', 'Email', 'Company', 'Thai', 'Intern', 'Honorific']:
                 self.tree.column(col, width=120)
             else:
                 self.tree.column(col, width=0, stretch=tk.NO)
@@ -292,13 +291,22 @@ class LinkedInApp:
             col_index = int(col[1:]) - 1
             item = self.tree.identify_row(event.y)
             values = list(self.tree.item(item, 'values'))
-            # If the "Thai" column (index 7) is clicked, toggle its value.
+            
+            # If the "Thai" column (index 7) is clicked, toggle its value
             if col_index == 7:
                 new_value = not (values[7] in [True, 'True'])
                 values[7] = new_value
                 self.tree.item(item, values=values)
+            # If the "Honorific" column is clicked, toggle between Mr. and Ms.
+            elif col_index == 10:  # Honorific column
+                current = values[10]
+                if current == 'Mr.':
+                    values[10] = 'Ms.'
+                else:
+                    values[10] = 'Mr.'
+                self.tree.item(item, values=values)
             else:
-                # For other columns, allow normal editing.
+                # For other columns, allow normal editing
                 current_value = values[col_index]
                 edit_win = tk.Toplevel()
                 edit_win.title("Edit Value")
@@ -308,7 +316,7 @@ class LinkedInApp:
                 ttk.Button(edit_win, text="Save",
                            command=lambda: self.save_edited_value(item, col_index, entry.get(), edit_win)
                            ).pack()
-            
+
     def handle_bot_detection(self):
         self.driver.save_screenshot('bot_detection.png')
         self._processing = False  # Pause processing
@@ -411,7 +419,6 @@ class LinkedInApp:
             self._processing = False
             self.update_ui_status("Processing complete")
             self.bring_to_front()
-            print("Processing complete - ready for new URLs")
             return
 
         url = self.profile_urls[self.current_url_index]
@@ -482,8 +489,13 @@ class LinkedInApp:
 
     def add_to_treeview(self, data, url):
         """Direct treeview update"""
+        # Format name to proper case if it's all caps
+        name = data['name']
+        if name.isupper():
+            name = ' '.join(word.capitalize() for word in name.split())
+        
         self.tree.insert('', 'end', values=(
-            data['name'],
+            name,  # Use formatted name
             data['email'],
             data['company'],
             data['position'],
@@ -492,7 +504,8 @@ class LinkedInApp:
             data['highschool'],
             data['thai'],
             url,
-            data['intern']
+            data['intern'],
+            data['honorific'] or ''  # Add honorific, empty string if None
         ))
         # Immediately update the GUI
         self.root.update_idletasks()
@@ -503,7 +516,7 @@ class LinkedInApp:
 
     def linkedin_login(self):
         try:
-            with open("config.json") as f:
+            with open("resources/config.json") as f:
                 config = json.load(f)
                 
             print("Navigating to LinkedIn login...")
@@ -632,7 +645,8 @@ class LinkedInApp:
                     'College': values[5],
                     'Highschool': values[6],
                     'Thai': values[7],
-                    'row_number': row_number
+                    'row_number': row_number,
+                    'honorific': values[10] if len(values) > 10 else None  # Add honorific with fallback
                 }
                 emailSendList.append(filtered_row)
                 
@@ -654,14 +668,12 @@ class LinkedInApp:
             invalid_emails = []
             valid_entries = []
             
-            # Verify resume exists
-            resume_path = os.path.join('Resources', 'NopparujVongpatarakulResume.pdf')
+            # Updated resume path
+            resume_path = os.path.join('attachments', 'NopparujVongpatarakulResume.pdf')
             if not os.path.exists(resume_path):
                 print(f"Resume not found at: {resume_path}")
-                resume_path = os.path.join('resources', 'NopparujVongpatarakulResume.pdf')  # Try lowercase folder
-                if not os.path.exists(resume_path):
-                    messagebox.showerror("Resume Error", "Resume not found in Resources or resources folder")
-                    return
+                messagebox.showerror("Resume Error", "Resume not found in attachments folder")
+                return
             
             for item in emailSendList:
                 email = item.get('Email', '')
@@ -697,10 +709,11 @@ class LinkedInApp:
                     msg = MIMEMultipart()
                     msg['From'] = "taz2547@gmail.com"
                     msg['To'] = item['Email']
-                    msg['Subject'] = "UIUC student who would love to connect!"
                     
-                    # Generate personalized message
-                    message_content = self.generate_email_content(item, now)
+                    # Get email content and subject
+                    message_content, subject = self.generate_email_content(item, now)
+                    msg['Subject'] = subject
+                    
                     msg.attach(MIMEText(message_content, 'plain'))
 
                     # Attach resume
@@ -792,57 +805,68 @@ class LinkedInApp:
             education = "UIUC"
             student_name = "Illini"
 
-        # Personalization
+        # Personalization with fallback for honorific
         last_name = item['Name'].strip().split()[-1] if ' ' in item['Name'] else item['Name']
+        honorific = item.get('honorific')  # Use .get() with default None
+        name_with_honorific = f"{honorific} {last_name}" if honorific else last_name
         current_year = current_time.year
         time_reference = "this week" if current_time.weekday() < 3 else "next week"
+        
+        # Create role description
+        role_description = f"{item['Position']} at {item['Company']}"
 
         # Build message template
         templates = {
-            'alumni': f"""Hi {last_name},
-    I hope this message finds you well. My name is Nopparuj (Taz), a third year Computer Science student at UIUC from Bangkok, Thailand. I'm reaching out because I'm particularly interested in {item['Company']}'s work in your field as a {item['Position']}.
+            'alumni': {
+                'subject': f"{education} student reaching out who would love to connect!",
+                'content': f"""Hi {name_with_honorific},
 
-    Having noticed your background at {education}, I'm inspired by your career path from {education} to {item['Company']}. As a fellow {student_name}, I'd greatly appreciate any insights you might share about breaking into this field.
+I hope this email finds you well. My name is Nopparuj (Taz), and I'm a third-year student at the University of Illinois Urbana-Champaign, studying computer science. I am reaching out because I am interested in learning about the internship at {item['Company']}.
 
-    Would you have {time_reference} for a brief 15-minute chat about your professional experiences? I completely understand if you're busy - even a quick email response would be incredibly helpful.
+I was particularly inspired to contact you upon learning that you completed your bachelor's at {education}. It's incredibly motivating to see a fellow {student_name} excel in a field that resonates with my interests. Your journey from {education} to {item['Company']} is the path I aspire to follow. As a result, I would greatly appreciate the chance to chat with you about your experiences. 
 
-    Thank you for considering my request, and I hope to connect soon!
+I understand that you are very busy. If you are available in the coming weeks to join me on a brief call, I would love to set something up. I have attached my resume to this email for your reference. Thank you so much for your time, and I look forward to hearing from you soon!
 
-    Best regards,
-    Taz""",
+Best regards,
+Taz""",
+            },
+            'thai': {
+                'subject': "Thai student reaching out who would love to connect!",
+                'content': f"""Hi {name_with_honorific},
 
-            'thai': f"""Hi {last_name},
-    I hope this email finds you well. My name is Nopparuj (Taz), a third year Computer Science student at UIUC from Bangkok. I'm reaching out because I'm impressed by {item['Company']}'s innovations in your field as a {item['Position']}.
+I hope this email finds you well. My name is Nopparuj (Taz), and I'm a third-year student at the University of Illinois Urbana-Champaign, studying computer science. I am reaching out because I am interested in learning about the internship at {item['Company']}.
 
-    As a Thai professional working abroad, your experience is particularly inspiring to me. I'd be grateful for any advice you might have about navigating international tech careers.
+As a Thai professional working abroad, your experience is particularly inspiring to me. It's incredibly motivating to see a fellow Thai person excel in a field that resonates with my interests. Your journey from {education} to {item['Company']} is the path I aspire to follow. As a result, I would greatly appreciate the chance to chat with you about your experiences. 
 
-    Might you have {time_reference} for a short conversation? I'd be happy to adjust to your schedule.
+I understand that you are very busy. If you are available in the coming weeks to join me on a brief call, I would love to set something up. I have attached my resume to this email for your reference. Thank you so much for your time, and I look forward to hearing from you soon!
 
-    Thank you for your time and consideration!
+Best regards,
+Taz""",
+            },
+            'general': {
+                'subject': "UIUC student interested in your work!",
+                'content': f"""Hi {name_with_honorific},
+                
+I hope this email finds you well. My name is Nopparuj (Taz), and I'm a third-year student at the University of Illinois Urbana-Champaign, studying computer science. I am reaching out because I am interested in learning about the internship at {item['Company']}.
 
-    Best regards,
-    Taz""",
+Your journey from {education} to {item['Company']} is the path I aspire to follow. As a result, I would greatly appreciate the chance to chat with you about your experiences. 
 
-            'general': f"""Hi {last_name},
-    I hope you're doing well! I'm Nopparuj (Taz), a third year CS student at UIUC from Bangkok. I'm reaching out because I'm keenly interested in {item['Company']}'s work in your role as a {item['Position']}.
+I understand that you are very busy. If you are available in the coming weeks to join me on a brief call, I would love to set something up. I have attached my resume to this email for your reference. Thank you so much for your time, and I look forward to hearing from you soon!
 
-    Your career journey from {education} to {item['Company']} is exactly the kind of path I aspire to follow. Could I possibly ask for {time_reference} for a brief chat about your experiences?
-
-    I completely understand if you're too busy - any insights you could share via email would also be greatly appreciated.
-
-    Thank you for your time!
-
-    Best regards,
-    Taz"""
+Best regards,
+Taz"""
+            }
         }
 
-        # Select template
-        if item['Thai']:
-            return templates['thai']
-        elif item['College'] or item['Highschool']:
-            return templates['alumni']
+        # Select template - Fix template selection logic
+        if item['Thai'] == True or item['Thai'] == 'True':  # Check for both boolean and string 'True'
+            template = templates['thai']
+        elif item['College'] == True or item['College'] == 'True' or item['Highschool'] == True or item['Highschool'] == 'True':
+            template = templates['alumni']
         else:
-            return templates['general']
+            template = templates['general']
+        
+        return template['content'], template['subject']
 
     def bring_to_front(self):
         """Bring window to front and maintain focus"""
@@ -881,8 +905,39 @@ def get_linkedin_profile_info(self, driver, profile_url):
         TR_college = False
         TR_highschool = False
         TR_thai = False
+        TR_honorific = None
         
         wait = WebDriverWait(driver, 10)
+        # Check for pronouns first
+        print("\n=== Checking for Pronouns ===")
+        driver.get(profile_url)
+        time.sleep(1)
+        try:
+            pronoun_elements = driver.find_elements(By.CLASS_NAME, "text-body-small.v-align-middle.break-words.t-black--light")
+            for element in pronoun_elements:
+                text = element.text.lower()
+                print(f"Found potential pronoun text: {text}")
+                if 'she' in text or 'her' in text:
+                    TR_honorific = 'Ms.'
+                    break
+                elif 'he' in text or 'him' in text:
+                    TR_honorific = 'Mr.'
+                    break
+            
+            # Fallback check if no pronouns found
+            if not TR_honorific:
+                print("No pronouns found")
+                intro_sections = driver.find_elements(By.CSS_SELECTOR, ".pv-pronouns")
+                for section in intro_sections:
+                    text = section.text.lower()
+                    if 'she' in text or 'her' in text:
+                        TR_honorific = 'Ms.'
+                        break
+                    elif 'he' in text or 'him' in text:
+                        TR_honorific = 'Mr.'
+                        break
+        except Exception as e:
+            print(f"Error checking pronouns: {str(e)}")
         
         # 1. Get Name from about-this-profile overlay
         driver.get(profile_url + "overlay/about-this-profile/")
@@ -962,7 +1017,7 @@ def get_linkedin_profile_info(self, driver, profile_url):
             last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
             
             # Initialize API client
-            with open("config.json") as f:
+            with open("resources/config.json") as f:
                 config = json.load(f)
             hunter = HunterIOAPI(config['hunter_api_key'])
             
@@ -1091,7 +1146,8 @@ def get_linkedin_profile_info(self, driver, profile_url):
         'college': bool(TR_college),      
         'highschool': bool(TR_highschool),
         'thai': bool(TR_thai),            
-        'intern': bool(TR_intern)         
+        'intern': bool(TR_intern),
+        'honorific': TR_honorific
     }
 
 
